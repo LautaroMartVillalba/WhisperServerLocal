@@ -3,13 +3,9 @@ Configuration module for WhisperLocal API.
 Loads environment variables from .env file.
 """
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -37,10 +33,12 @@ class Settings(BaseSettings):
     api_host: str
     api_port: int
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
     
     @property
     def max_file_size_bytes(self) -> int:
