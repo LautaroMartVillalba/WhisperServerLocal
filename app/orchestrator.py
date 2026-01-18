@@ -5,14 +5,20 @@ This is the main service that ties together audio processing and transcription.
 
 import logging
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from pathlib import Path
+from functools import partial
 
 from app.audio_processor import audio_processor
 from app.whisper_service import whisper_service
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for blocking operations (increased to handle concurrent requests)
+_executor = ThreadPoolExecutor(max_workers=settings.workers_count, thread_name_prefix="whisper-worker")
 
 
 class TranscriptionOrchestrator:
@@ -27,6 +33,36 @@ class TranscriptionOrchestrator:
         self.whisper_service = whisper_service
         settings.ensure_tmp_dir()
     
+    def _sync_transcribe(
+        self,
+        audio_file_path: str,
+        language: Optional[str] = None
+    ) -> tuple[Dict[str, any], str]:
+        """
+        Synchronous transcription logic to run in thread pool.
+        
+        Returns:
+            Tuple of (transcription_result, processed_wav_path)
+        """
+        import threading
+        thread_name = threading.current_thread().name
+        logger.info(f"[{thread_name}] Starting processing in worker thread")
+        
+        # Step 1 & 2 & 3: Process audio (validate, check duration, convert to 16kHz WAV)
+        logger.info(f"[{thread_name}] Step 1-3: Processing audio file...")
+        processed_wav_path = self.audio_processor.process_audio(audio_file_path)
+        
+        # Step 4: Transcribe with Whisper
+        logger.info(f"[{thread_name}] Step 4: Transcribing audio with Whisper...")
+        transcription_result = self.whisper_service.transcribe(
+            audio_path=processed_wav_path,
+            language=language
+        )
+        
+        logger.info(f"[{thread_name}] Processing completed in worker thread")
+        
+        return transcription_result, processed_wav_path
+    
     async def transcribe_audio(
         self,
         audio_file_path: str,
@@ -35,12 +71,13 @@ class TranscriptionOrchestrator:
     ) -> Dict[str, any]:
         """
         Complete transcription workflow from audio file to text.
+        Runs blocking operations in a thread pool to allow concurrent processing.
         
         Workflow:
         1. Validate audio file (format, size)
         2. Check audio duration
         3. Convert to 16kHz WAV format
-        4. Transcribe with Whisper
+        4. Transcribe with Whisper (in thread pool)
         5. Cleanup temporary files
         6. Return transcription result
         
@@ -65,15 +102,13 @@ class TranscriptionOrchestrator:
         try:
             logger.info(f"Starting transcription workflow for: {audio_file_path}")
             
-            # Step 1 & 2 & 3: Process audio (validate, check duration, convert to 16kHz WAV)
-            logger.info("Step 1-3: Processing audio file...")
-            processed_wav_path = self.audio_processor.process_audio(audio_file_path)
-            
-            # Step 4: Transcribe with Whisper
-            logger.info("Step 4: Transcribing audio with Whisper...")
-            transcription_result = self.whisper_service.transcribe(
-                audio_path=processed_wav_path,
-                language=language
+            # Run blocking operations in thread pool
+            loop = asyncio.get_event_loop()
+            transcription_result, processed_wav_path = await loop.run_in_executor(
+                _executor,
+                self._sync_transcribe,
+                audio_file_path,
+                language
             )
             
             # Add success flag
