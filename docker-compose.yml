@@ -1,0 +1,67 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: whisper-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - whisper-local-network
+
+  whisper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whisper-api
+    ports:
+      - "7050:7050"
+    environment:
+      - WHISPER_MODEL=base
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+      - MAX_FILE_SIZE_MB=25
+      - MAX_AUDIO_DURATION_SEC=300
+      - AUDIO_SAMPLE_RATE=16000
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_QUEUE_NAME=whisper_transcriptions
+      - WORKERS_COUNT=5
+      - TMP_DIR=/tmp/whisper_uploads
+      - API_HOST=0.0.0.0
+      - API_PORT=7050
+    volumes:
+      - whisper_models:/app/models
+      - whisper_tmp:/tmp/whisper_uploads
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - whisper-local-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:7050/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  rabbitmq_data:
+    driver: local
+  whisper_models:
+    driver: local
+  whisper_tmp:
+    driver: local
+
+networks:
+  whisper-local-network:
+    driver: bridge
