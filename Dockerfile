@@ -18,9 +18,11 @@ pkg-config
 COPY ./requirements.txt ./
 RUN pip install -r requirements.txt
 
-COPY ./.env ./
 COPY ./app ./app/
+
+RUN mkdir -p /tmp/shared_audio && \
+    chmod 777 /tmp/shared_audio
 
 EXPOSE 7050
 
-CMD ["python", "-m", "app.main"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7050"]
