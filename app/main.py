@@ -11,10 +11,12 @@ import uuid
 import os
 from pathlib import Path
 from typing import Optional
+import threading
 
 from app.config import settings
 from app.orchestrator import orchestrator
 from app.concurrency import concurrency_manager
+from app.rabbitmq.consumer import RabbitMQConsumer
 
 # Configure logging
 logging.basicConfig(
@@ -98,6 +100,21 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize Whisper service: {str(e)}")
         raise
+    
+    # Start RabbitMQ consumer in a separate thread
+    def start_consumer():
+        """Start RabbitMQ consumer in background thread."""
+        try:
+            logger.info("Starting RabbitMQ consumer thread...")
+            consumer = RabbitMQConsumer()
+            consumer.start_consuming()
+        except Exception as e:
+            logger.error(f"RabbitMQ consumer failed: {str(e)}")
+    
+    # Start consumer in daemon thread (will stop when main app stops)
+    consumer_thread = threading.Thread(target=start_consumer, daemon=True)
+    consumer_thread.start()
+    logger.info("RabbitMQ consumer thread started")
     
     logger.info("WhisperLocal API started successfully")
 
