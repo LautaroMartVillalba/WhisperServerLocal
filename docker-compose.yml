@@ -1,22 +1,23 @@
 services:
+  # RabbitMQ para desarrollo local (comentar cuando se integre con el servidor WhatsApp)
   rabbitmq:
     image: rabbitmq:3.12-management
-    container_name: whisper-rabbitmq
+    container_name: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 3
     networks:
-      - whisper-local-network
+      - whatsapp-network
 
   whisper-api:
     build:
@@ -32,20 +33,20 @@ services:
       - MAX_FILE_SIZE_MB=25
       - MAX_AUDIO_DURATION_SEC=300
       - AUDIO_SAMPLE_RATE=16000
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://admin:admin@rabbitmq:5672/
       - RABBITMQ_QUEUE_NAME=whisper_transcriptions
       - WORKERS_COUNT=5
-      - TMP_DIR=/tmp/whisper_uploads
+      - TMP_DIR=/tmp/shared_audio
       - API_HOST=0.0.0.0
       - API_PORT=7050
     volumes:
       - whisper_models:/app/models
-      - whisper_tmp:/tmp/whisper_uploads
+      - /tmp/shared_audio:/tmp/shared_audio
     depends_on:
       rabbitmq:
         condition: service_healthy
     networks:
-      - whisper-local-network
+      - whatsapp-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:7050/health || exit 1"]
@@ -59,9 +60,8 @@ volumes:
     driver: local
   whisper_models:
     driver: local
-  whisper_tmp:
-    driver: local
 
 networks:
-  whisper-local-network:
+  whatsapp-network:
+    # external: true  # Descomentar cuando se integre con el servidor WhatsApp
     driver: bridge
