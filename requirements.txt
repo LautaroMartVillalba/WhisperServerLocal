@@ -1,1 +1,9 @@
-fastapi uvicorn[standard] python-multipart faster-whisper pydub python-dotenv pika pydantic-settings requests 
+fastapi
+uvicorn[standard]
+python-multipart
+faster-whisper
+pydub
+python-dotenv
+pika
+pydantic-settings
+requests 

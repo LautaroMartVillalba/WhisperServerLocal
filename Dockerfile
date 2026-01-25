@@ -1,28 +1,64 @@
-FROM python:3.11
+FROM golang:1.21-bookworm AS go-builder
 
-# RUN apt-get update && apt-get install -y python3.13 python3.13-dev
+WORKDIR /build
+
+# Copy Go module files
+COPY go.mod go.sum* ./
+
+# Download dependencies (cached if go.mod unchanged)
+RUN go mod download
+
+# Copy source code
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+# Build the orchestrator binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /orchestrator ./cmd/orchestrator
+
+# -----------------------------------------------------------------------------
+# Stage 2: Final image with Python + Go binary
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-ffmpeg \
-libavformat-dev \
-libavcodec-dev \
-libavdevice-dev \
-libavutil-dev \
-libavfilter-dev \
-libswresample-dev \
-libswresample-dev \
-pkg-config
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libavformat-dev \
+    libavcodec-dev \
+    libavutil-dev \
+    libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY ./requirements.txt ./
-RUN pip install -r requirements.txt
+# Copy Go binary from builder stage
+COPY --from=go-builder /orchestrator /usr/local/bin/orchestrator
 
-COPY ./app ./app/
+# Copy Python worker code
+COPY python/ ./python/
 
-RUN mkdir -p /tmp/shared_audio && \
-    chmod 777 /tmp/shared_audio
+# Install Python dependencies
+RUN pip install --no-cache-dir -r python/requirements.txt
 
-EXPOSE 7050
+# Create necessary directories
+RUN mkdir -p /tmp/whisper /app/models \
+    && chmod 777 /tmp/whisper
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7050"]
+# Environment variables (defaults, override in docker-compose)
+ENV PYTHONUNBUFFERED=1 \
+    PYTHON_PATH=/usr/local/bin/python3 \
+    WORKER_SCRIPT=/app/python/worker.py \
+    WHISPER_MODEL=base \
+    WHISPER_DEVICE=cpu \
+    WHISPER_COMPUTE_TYPE=int8 \
+    MODELS_DIR=/app/models \
+    MAX_FILE_SIZE_MB=100 \
+    MAX_AUDIO_DURATION_SEC=3600 \
+    AUDIO_SAMPLE_RATE=16000 \
+    TMP_DIR=/tmp/whisper \
+    WORKERS_COUNT=4 \
+    PROCESS_IDLE_TIMEOUT_MIN=5 \
+    RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+
+# Run the Go orchestrator
+CMD ["orchestrator"]
