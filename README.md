@@ -1,300 +1,357 @@
 # Whisper-Local
 
-Servicio de transcripción de audio usando Whisper con arquitectura híbrida Go + Python y comunicación vía RabbitMQ.
+Servicio de transcripción de audio local usando [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Arquitectura híbrida **Go + Python** con mensajería vía **RabbitMQ**.
 
-## 🏗️ Arquitectura
+Go actúa como orquestador: gestiona la concurrencia, la mensajería y la validación superficial. Python ejecuta el procesamiento pesado de audio y la inferencia del modelo Whisper, que se carga **una sola vez en memoria** al arrancar cada worker.
+
+---
+
+## Arquitectura
 
 ```
-RabbitMQ → Go Orchestrator → Pool de Procesos Python → Whisper (faster-whisper)
+[Productor externo]
+        │
+        ▼ publica en
+┌────────────────────────────────────────┐
+│  whisper_exchange (RabbitMQ, direct)   │
+│  routing key: transcription.request    │
+└──────────────┬─────────────────────────┘
+               │
+               ▼ consume
+┌──────────────────────────────────────────────┐
+│             Go Orchestrator                  │
+│  ┌───────────────────────────────────────┐   │
+│  │  Worker Pool (N goroutines)           │   │
+│  │   - Valida existencia del archivo     │   │
+│  │   - Valida extensión soportada        │   │
+│  │   - Delega al Process Pool            │   │
+│  └──────────────┬────────────────────────┘   │
+│                 │ stdin/stdout JSON           │
+│  ┌──────────────▼────────────────────────┐   │
+│  │  Process Pool (N procesos Python)     │   │
+│  │   - Convierte audio a WAV 16kHz mono  │   │
+│  │   - Transcribe con faster-whisper     │   │
+│  └───────────────────────────────────────┘   │
+└──────────────┬───────────────────────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+  [Éxito]          [Fallo / Reintento]
+       │                │
+       ▼                ▼ TTL 5s → DLX → whisper_transcriptions
+whisper_results   whisper_retry_queue  (hasta 2 reintentos)
 ```
 
-- **Go Orchestrator**: Maneja concurrencia, mensajería RabbitMQ y validación de archivos
-- **Procesos Python**: Ejecutan procesamiento de audio y transcripción ML (modelo cargado una vez en memoria)
-- **Comunicación**: Go ↔ Python via stdin/stdout JSON, servicios externos via RabbitMQ
+---
 
-## ✨ Características
+## Mensajería RabbitMQ
 
-- 🎯 Transcripción usando faster-whisper (optimizado)
-- 🔄 Procesamiento concurrente con pool de workers
-- 📦 Formatos soportados: opus, mp3, wav, m4a, ogg, flac, aac, wma
-- 🚀 Conversión automática a 16kHz mono WAV
-- ⚡ Detección de voz (VAD) para omitir silencios
-- 🔁 Sistema de reintentos automáticos (máx 2 reintentos con delay de 5s)
-- 🐳 Contenerizado con Docker
+> Esta sección define el **contrato completo** de comunicación con el servicio. Toda la topología se declara automáticamente al iniciar; no es necesario crearla manualmente.
 
-## 🚀 Inicio Rápido
+### Topología declarada
 
-### Con Docker Compose
+| Recurso | Tipo | Nombre |
+|---|---|---|
+| Exchange de entrada | `direct`, durable | `whisper_exchange` |
+| Cola de entrada | durable | `whisper_transcriptions` |
+| Exchange de resultados | `direct`, durable | `whisper_results_exchange` |
+| Cola de resultados | durable | `whisper_results` |
+| Exchange de reintentos | `direct`, durable | `whisper_retry_exchange` |
+| Cola de reintentos | durable, TTL 5s, DLX → `whisper_exchange` | `whisper_retry_queue` |
 
-```bash
-docker-compose up -d
-```
+---
 
-Esto inicia:
-- RabbitMQ en `localhost:5672` (Management UI en `localhost:15672`)
-- Whisper service consumiendo de la cola
+### 📥 Mensaje de Entrada — Request
 
-### Solo el servicio Whisper
+**Dónde publicar:**
+- Exchange: `whisper_exchange`
+- Routing Key: `transcription.request`
+- Cola destino: `whisper_transcriptions`
 
-```bash
-docker build -t whisper-local .
-docker run -d \
-  -e RABBITMQ_URL=amqp://admin:admin@rabbitmq:5672/ \
-  -e WORKERS_COUNT=4 \
-  -e WHISPER_MODEL=base \
-  -v whisper_models:/app/models \
-  whisper-local
-```
-
-## 📨 Formato de Mensajes
-
-### 📥 Mensaje de Entrada (Request)
-
-**Cola**: `whisper_transcriptions`  
-**Exchange**: `whisper_exchange`  
-**Routing Key**: `transcription.request`
+> **Requisito del archivo de audio:** la ruta `audio_file_path` debe ser **accesible desde el sistema de archivos del contenedor/host donde corre el servicio**. Con Docker, monta el directorio de audios como volumen compartido entre el servicio productor y `whisper-api`. El `docker-compose.yml` monta `/tmp/shared_audio` por defecto.
 
 ```json
 {
-  "attachment_id": 12345,
-  "audio_file_path": "/tmp/shared_audio/audio.mp3",
-  "language": "es"
+  "attachment_id": 123,
+  "audio_file_path": "/tmp/shared_audio/grabacion.mp3",
+  "language": "es",
+  "import_batch_id": 7
 }
 ```
 
 | Campo | Tipo | Requerido | Descripción |
-|-------|------|-----------|-------------|
-| `attachment_id` | int | ✅ | ID único del archivo de audio |
-| `audio_file_path` | string | ✅ | Ruta absoluta al archivo de audio |
-| `language` | string | ❌ | Código ISO 639-1 (ej: 'es', 'en'). Si se omite, se detecta automáticamente |
+|---|---|---|---|
+| `attachment_id` | `int` | ✅ | Identificador único del trabajo. Se devuelve en el resultado para correlacionar la respuesta. |
+| `audio_file_path` | `string` | ✅ | Ruta absoluta al archivo de audio accesible desde el contenedor del servicio. |
+| `language` | `string` | ❌ | Código de idioma ISO 639-1 (ej: `"es"`, `"en"`, `"pt"`). Si se omite o es `""`, Whisper lo detecta automáticamente. |
+| `import_batch_id` | `int \| null` | ❌ | Ver sección [import_batch_id](#import_batch_id). |
 
-**⚙️ Modificar formato**: Editar `TranscriptionRequest` en [`internal/rabbitmq/types.go`](internal/rabbitmq/types.go)
+**Formatos de audio soportados:** `.opus`, `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.aac`, `.wma`
+
+**Modificar el tipo del mensaje:** `TranscriptionRequest` en [internal/rabbitmq/types.go](internal/rabbitmq/types.go).
 
 ---
 
-### 📤 Mensaje de Salida (Result)
+### 📤 Mensaje de Salida — Result
 
-**Cola**: `whisper_results`  
-**Exchange**: `whisper_results_exchange`  
-**Routing Key**: `transcription.result`
+**Dónde consumir:**
+- Exchange: `whisper_results_exchange`
+- Routing Key: `transcription.result`
+- Cola: `whisper_results`
 
-#### ✅ Respuesta Exitosa
+El servicio **siempre publica exactamente un resultado por cada job recibido**, ya sea exitoso o fallido. No hay jobs que queden sin respuesta (salvo errores de red al publicar, que generan NACK con requeue).
+
+#### Resultado exitoso (`success: true`)
 
 ```json
 {
-  "attachment_id": 12345,
-  "texto": "Esta es la transcripción del audio.",
-  "duration": 45.3,
+  "attachment_id": 123,
+  "texto": "Hola, esto es una transcripción de prueba.",
+  "duration": 12.45,
   "model": "base",
-  "success": true
+  "success": true,
+  "import_batch_id": 7
 }
 ```
 
-#### ❌ Respuesta con Error
+#### Resultado con error (`success: false`)
 
 ```json
 {
-  "attachment_id": 12345,
+  "attachment_id": 123,
   "texto": "",
   "duration": 0,
   "model": "base",
   "success": false,
-  "error_message": "Audio file not found: /tmp/audio.mp3"
+  "import_batch_id": 7,
+  "error_message": "Audio file not found: /tmp/shared_audio/grabacion.mp3"
 }
 ```
 
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `attachment_id` | int | ID del archivo procesado |
-| `texto` | string | Texto transcrito (vacío si hay error) |
-| `duration` | float | Duración del audio en segundos |
-| `model` | string | Modelo Whisper usado (ej: 'base', 'medium') |
-| `success` | bool | `true` si transcripción exitosa, `false` si hubo error |
-| `error_message` | string | Mensaje de error (solo presente si `success: false`) |
+| Campo | Tipo | Siempre presente | Descripción |
+|---|---|---|---|
+| `attachment_id` | `int` | ✅ | Mismo valor recibido en el request. |
+| `texto` | `string` | ✅ | Texto transcrito. Vacío (`""`) si hubo error. |
+| `duration` | `float64` | ✅ | Duración del audio en segundos. `0` si hubo error. |
+| `model` | `string` | ✅ | Nombre del modelo Whisper usado (ej: `"base"`). |
+| `success` | `bool` | ✅ | `true` si la transcripción fue exitosa, `false` en cualquier tipo de error. |
+| `import_batch_id` | `int \| null` | ✅ | Mismo valor recibido en el request. |
+| `error_message` | `string` | ❌ | Descripción del error. Solo presente cuando `success` es `false`. |
 
-**⚙️ Modificar formato**: Editar `TranscriptionResult` en [`internal/rabbitmq/types.go`](internal/rabbitmq/types.go)
+**Modificar el tipo del mensaje:** `TranscriptionResult` en [internal/rabbitmq/types.go](internal/rabbitmq/types.go).
 
 ---
 
 ### 🔁 Sistema de Reintentos
 
-Si falla una transcripción, el mensaje se reenvía a:
+Cuando una transcripción falla (error de Python, proceso muerto, fallo de validación de audio), el job entra al mecanismo de reintentos.
 
-**Cola**: `whisper_retry_queue` (con TTL de 5 segundos)  
-**Exchange**: `whisper_retry_exchange`  
-**Routing Key**: `transcription.retry`
+**Flujo:**
+1. Fallo → el orchestrator publica el request original en `whisper_retry_exchange` con routing key `transcription.retry`, incrementando `retry_count`.
+2. `whisper_retry_queue` tiene TTL de **5000ms**. Al expirar, el mensaje es redirigido automáticamente (Dead Letter Exchange) de vuelta a `whisper_exchange` → `whisper_transcriptions`.
+3. El campo `retry_count` viaja en el header AMQP `x-retry-count` y en el cuerpo del mensaje.
+4. Si `retry_count >= 2` (máximo de reintentos alcanzado), se publica directamente un mensaje de error en `whisper_results` y se hace ACK definitivo.
 
-Después del TTL, el mensaje vuelve a la cola principal. Máximo **2 reintentos** (3 intentos totales).
+**Configuración de reintentos** en [internal/rabbitmq/producer.go](internal/rabbitmq/producer.go):
+- `MaxRetries = 2` → 3 intentos totales
+- `RetryTTLMs = 5000` → 5 segundos de espera entre intentos
 
-**⚙️ Modificar reintentos**: Editar constantes en [`internal/rabbitmq/producer.go`](internal/rabbitmq/producer.go):
-- `RetryTTLMs`: Delay entre reintentos (5000 = 5 segundos)
-- `MaxRetries`: Número máximo de reintentos (2 = 3 intentos totales)
+> Los errores de validación superficial en Go (archivo no encontrado, extensión no soportada) **no** van al sistema de reintentos: publican directamente un error y hacen ACK, ya que son errores determinísticos que no se resolverán con reintentar.
 
-## ⚙️ Configuración
+---
 
-### Variables de Entorno
+## import_batch_id
+
+`import_batch_id` es un campo **opcional** de tipo `int | null` incluido en el código para facilitar la integración con el servicio original que consume estas transcripciones. Su función es **puramente organizativa**: permite agrupar múltiples trabajos de transcripción bajo un mismo número de lote para que el servicio consumidor pueda rastrearlos en conjunto.
+
+El servicio Whisper-Local **no utiliza este campo en ninguna lógica interna**. Lo recibe en el request y lo devuelve sin modificación en el result.
+
+**Si no necesitás esta funcionalidad**, podés eliminar el campo `ImportBatchID` de `TranscriptionRequest` y `TranscriptionResult` en [internal/rabbitmq/types.go](internal/rabbitmq/types.go) sin ningún impacto en el resto del sistema. También podés extenderlo (cambiarlo a `string`, agregar más campos de agrupación, etc.) según las necesidades del servicio que lo consuma.
+
+---
+
+## Componentes Internos
+
+### Go Orchestrator
+
+**[cmd/orchestrator/main.go](cmd/orchestrator/main.go)**  
+Punto de entrada. Levanta todos los subsistemas en orden (config → RabbitMQ → ProcessPool → WorkerPool → Consumer) y bloquea hasta recibir `SIGINT` o `SIGTERM`, luego hace shutdown ordenado.
+
+**[internal/config/config.go](internal/config/config.go)**  
+Carga toda la configuración desde variables de entorno con valores por defecto. Expone `GetPythonEnv()` que genera el slice de env vars que se inyectan a cada proceso Python al spawnearlos.
+
+**[internal/rabbitmq/connection.go](internal/rabbitmq/connection.go)**  
+Conecta a RabbitMQ con reintentos automáticos (hasta 10 intentos, 5s de espera entre cada uno).
+
+**[internal/rabbitmq/consumer.go](internal/rabbitmq/consumer.go)**  
+Declara la topología de entrada (exchange + cola + binding). Configura QoS con prefetch igual a `WORKERS_COUNT` para no saturar el pool. Retorna un canal `<-chan Job` que el orchestrator consume en una goroutine.
+
+**[internal/rabbitmq/producer.go](internal/rabbitmq/producer.go)**  
+Declara la topología de salida y reintentos. Expone `PublishSuccess`, `PublishError` y `PublishRetry`. La cola de reintentos usa `x-message-ttl`, `x-dead-letter-exchange` y `x-dead-letter-routing-key` para redirigir automáticamente mensajes expirados de vuelta a la cola principal.
+
+**[internal/rabbitmq/types.go](internal/rabbitmq/types.go)**  
+Define los cuatro structs de mensajes: `TranscriptionRequest` (entrada RabbitMQ), `TranscriptionResult` (salida RabbitMQ), `PythonWorkerRequest` (enviado a Python por stdin) y `PythonWorkerResponse` (recibido de Python por stdout).
+
+**[internal/validator/file.go](internal/validator/file.go)**  
+Validación rápida en Go antes de involucrar un worker Python: verifica existencia del archivo en disco y extensión soportada. Si falla, publica error inmediatamente y libera el worker.
+
+**[internal/worker/pool.go](internal/worker/pool.go)**  
+Pool de N goroutines. Cada goroutine toma jobs del canal interno, aplica validación, llama al `ProcessPool` y publica el resultado. Contiene la lógica de reintentos (`handleFailure`).
+
+**[internal/worker/process_pool.go](internal/worker/process_pool.go)**  
+Gestiona N procesos Python persistentes. Al arrancar, spawnea los procesos y espera la señal `READY` de cada uno. La comunicación es por **stdin/stdout JSON** (ver protocolo abajo). Si un proceso muere, se respawnea automáticamente al intentar usarlo. Un goroutine de mantenimiento mata procesos que llevan más de `PROCESS_IDLE_TIMEOUT_MIN` minutos sin uso.
+
+---
+
+### Python Workers
+
+**[python/worker.py](python/worker.py)**  
+Punto de entrada del worker Python. Al arrancar inicializa `AudioProcessor` y `WhisperService` (carga el modelo en memoria), luego imprime `READY\n` a stdout. Entra en un loop: lee una línea JSON de stdin, procesa, escribe una línea JSON a stdout. Usa `select()` en Linux para detectar idle timeout y salir limpiamente.
+
+**[python/audio_processor.py](python/audio_processor.py)**  
+Pipeline de preprocesamiento de audio:
+1. Valida tamaño del archivo (≤ `MAX_FILE_SIZE_MB`).
+2. Valida extensión soportada.
+3. Carga el audio con `pydub` y verifica duración (≤ `MAX_AUDIO_DURATION_SEC`).
+4. Convierte a **WAV 16kHz mono** y guarda en `TMP_DIR` con nombre UUID.
+5. Limpia los archivos temporales (WAV generado + original) después de la transcripción.
+
+**[python/whisper_service.py](python/whisper_service.py)**  
+Singleton de transcripción. El modelo `faster-whisper` se carga **una sola vez por proceso** y se reutiliza en todas las llamadas. Transcribe con `beam_size=5` y `vad_filter=True` (omite silencios con mínimo de 500ms). Devuelve texto completo, duración e idioma detectado.
+
+---
+
+### Protocolo de comunicación Go ↔ Python
+
+La comunicación entre el orchestrator y cada proceso Python es por **líneas JSON sobre stdin/stdout**. Una mensaje = una línea terminada en `\n`. Los logs de Python van a **stderr** para no interferir con el protocolo.
+
+**Handshake al arrancar el proceso:**
+```
+Go:     spawns python worker.py
+Python: imprime → READY\n
+Go:     lee "READY" → proceso disponible en el pool
+```
+
+**Por cada job:**
+```
+Go escribe en stdin:
+{"audio_file_path": "/tmp/audio.mp3", "language": "es"}\n
+
+Python escribe en stdout (éxito):
+{"success": true, "texto": "...", "duration": 12.5, "model": "base"}\n
+
+Python escribe en stdout (error):
+{"success": false, "error_message": "..."}\n
+```
+
+---
+
+## Configuración — Variables de Entorno
 
 | Variable | Default | Descripción |
-|----------|---------|-------------|
-| **RabbitMQ** |||
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672/` | URL de conexión |
-| **Workers** |||
-| `WORKERS_COUNT` | `4` | Cantidad de workers concurrentes |
-| `PROCESS_IDLE_TIMEOUT_MIN` | `5` | Minutos de inactividad antes de cerrar proceso Python |
-| **Whisper** |||
-| `WHISPER_MODEL` | `base` | Modelo: tiny, base, small, medium, large |
-| `WHISPER_DEVICE` | `cpu` | Dispositivo: cpu, cuda |
-| `WHISPER_COMPUTE_TYPE` | `int8` | Precisión: int8, float16, float32 |
-| `MODELS_DIR` | `./models` | Directorio para cache de modelos |
-| **Audio** |||
-| `MAX_FILE_SIZE_MB` | `100` | Tamaño máximo de archivo |
-| `MAX_AUDIO_DURATION_SEC` | `3600` | Duración máxima (segundos) |
-| `AUDIO_SAMPLE_RATE` | `16000` | Frecuencia de muestreo (Hz) |
-| `TMP_DIR` | `/tmp/whisper` | Directorio temporal |
-| **Python** |||
+|---|---|---|
+| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672/` | URL de conexión a RabbitMQ |
+| `WORKERS_COUNT` | `4` | Cantidad de workers concurrentes (goroutines Go = procesos Python) |
+| `PROCESS_IDLE_TIMEOUT_MIN` | `5` | Minutos de inactividad antes de cerrar un proceso Python |
+| `WHISPER_MODEL` | `base` | Modelo: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3` |
+| `WHISPER_DEVICE` | `cpu` | Dispositivo de inferencia: `cpu`, `cuda` |
+| `WHISPER_COMPUTE_TYPE` | `int8` | Precisión: `int8` (CPU), `float16` (GPU), `float32` |
+| `MODELS_DIR` | `./models` | Directorio de caché de modelos Whisper |
+| `MAX_FILE_SIZE_MB` | `100` | Tamaño máximo de archivo de audio (MB) |
+| `MAX_AUDIO_DURATION_SEC` | `3600` | Duración máxima del audio (segundos) |
+| `AUDIO_SAMPLE_RATE` | `16000` | Frecuencia de muestreo target para conversión (Hz) |
+| `TMP_DIR` | `/tmp/whisper` | Directorio para archivos WAV temporales |
 | `PYTHON_PATH` | `/usr/bin/python3` | Ruta al ejecutable Python |
-| `WORKER_SCRIPT` | `/app/python/worker.py` | Script del worker Python |
+| `WORKER_SCRIPT` | `/app/python/worker.py` | Ruta al script del worker Python |
 
-**⚙️ Modificar configuración**: Ver [`internal/config/config.go`](internal/config/config.go)
+---
 
-## 📁 Estructura del Proyecto
+## Inicio Rápido
 
-```
-whisper-local/
-├── cmd/orchestrator/          # Punto de entrada Go
-│   └── main.go
-├── internal/
-│   ├── config/                # Configuración desde env vars
-│   ├── rabbitmq/              # Cliente RabbitMQ (consumer, producer, types)
-│   ├── validator/             # Validación de archivos
-│   └── worker/                # Pool de workers y procesos Python
-├── python/
-│   ├── worker.py              # Worker Python (punto de entrada)
-│   ├── audio_processor.py     # Validación y conversión de audio
-│   ├── whisper_service.py     # Servicio de transcripción
-│   └── requirements.txt
-├── docker-compose.yml
-├── Dockerfile
-└── go.mod
-```
-
-## 🔧 Desarrollo
-
-### Requisitos Locales
-
-- Go 1.21+
-- Python 3.11+
-- RabbitMQ
-- ffmpeg
-
-### Ejecutar localmente
+### Docker Compose
 
 ```bash
-# 1. Iniciar RabbitMQ
-docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3.12-management
+docker-compose up -d
+```
 
-# 2. Instalar dependencias Python
+Levanta RabbitMQ (`localhost:5672`, Management UI en `localhost:15672`) y el servicio Whisper.
+
+### Desarrollo local
+
+```bash
+# 1. RabbitMQ
+docker run -d -p 5672:5672 -p 15672:15672 \
+  -e RABBITMQ_DEFAULT_USER=admin -e RABBITMQ_DEFAULT_PASS=admin \
+  rabbitmq:3.12-management
+
+# 2. Dependencias Python
 pip install -r python/requirements.txt
 
-# 3. Compilar y ejecutar Go
+# 3. Compilar y ejecutar
 go run cmd/orchestrator/main.go
 ```
 
-### Publicar mensaje de prueba
+### GPU (NVIDIA)
+
+```bash
+docker run -d --gpus all \
+  -e WHISPER_DEVICE=cuda \
+  -e WHISPER_COMPUTE_TYPE=float16 \
+  -e WHISPER_MODEL=large-v3 \
+  -v whisper_models:/app/models \
+  whisper-local
+```
+
+---
+
+## Ejemplos de uso
+
+### Publicar un job
 
 ```python
-import pika
-import json
+import pika, json
 
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters('localhost')
-)
-channel = connection.channel()
+conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+ch = conn.channel()
 
-message = {
-    "attachment_id": 1,
-    "audio_file_path": "/path/to/audio.mp3",
-    "language": "es"
-}
-
-channel.basic_publish(
+ch.basic_publish(
     exchange='whisper_exchange',
     routing_key='transcription.request',
-    body=json.dumps(message)
+    properties=pika.BasicProperties(delivery_mode=2),  # persistent
+    body=json.dumps({
+        "attachment_id": 1,
+        "audio_file_path": "/tmp/shared_audio/audio.mp3",
+        "language": "es",
+        "import_batch_id": None  # opcional
+    })
 )
-
-print("Mensaje enviado!")
-connection.close()
+conn.close()
 ```
 
 ### Consumir resultados
 
 ```python
-import pika
+import pika, json
 
-def callback(ch, method, properties, body):
-    print(f"Resultado: {body.decode()}")
+def on_result(ch, method, props, body):
+    result = json.loads(body)
+    if result["success"]:
+        print(f"[{result['attachment_id']}] {result['texto']}")
+    else:
+        print(f"[{result['attachment_id']}] ERROR: {result['error_message']}")
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters('localhost')
-)
-channel = connection.channel()
-
-channel.basic_consume(
-    queue='whisper_results',
-    on_message_callback=callback
-)
-
-print("Esperando resultados...")
-channel.start_consuming()
+conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+ch = conn.channel()
+ch.basic_qos(prefetch_count=1)
+ch.basic_consume(queue='whisper_results', on_message_callback=on_result)
+ch.start_consuming()
 ```
 
-## 🐳 Docker
+---
 
-### Build
+## Dependencias
 
-```bash
-docker build -t whisper-local .
-```
-
-### Usar con GPU (NVIDIA)
-
-```bash
-docker run -d \
-  --gpus all \
-  -e WHISPER_DEVICE=cuda \
-  -e WHISPER_COMPUTE_TYPE=float16 \
-  -e WHISPER_MODEL=medium \
-  -v whisper_models:/app/models \
-  whisper-local
-```
-
-## 📊 Topología de Colas RabbitMQ
-
-```
-whisper_exchange (direct)
-  └─ [transcription.request] → whisper_transcriptions (queue)
-                                      ↓
-                                  Orchestrator
-                                      ↓
-                              ┌───────┴───────┐
-                              ↓               ↓
-                         [Success]        [Failure]
-                              ↓               ↓
-whisper_results_exchange  ←──┘      whisper_retry_exchange
-  └─ whisper_results (queue)          └─ whisper_retry_queue (TTL: 5s)
-                                                ↓
-                                    (vuelve a whisper_transcriptions)
-```
-
-## 📝 Notas
-
-- Los procesos Python son **persistentes**: el modelo se carga una vez al inicio
-- **Graceful shutdown**: Maneja señales SIGINT/SIGTERM correctamente
-- Los archivos temporales se limpian automáticamente después de la transcripción
-- Validación en **dos capas**: Go valida existencia/extensión, Python valida formato/tamaño/duración
-
-## 📄 Licencia
-
-Este proyecto es de código abierto.
+**Go:** `github.com/rabbitmq/amqp091-go`, `github.com/joho/godotenv`  
+**Python:** `faster-whisper >= 1.0.0`, `pydub >= 0.25.1`  
+**Sistema:** `ffmpeg` (requerido por pydub para decodificar formatos de audio)
