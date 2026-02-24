@@ -3,20 +3,22 @@ package rabbitmq
 
 // TranscriptionRequest represents an incoming transcription job from RabbitMQ.
 type TranscriptionRequest struct {
-	AttachmentID  int    `json:"attachment_id"`
-	AudioFilePath string `json:"audio_file_path"`
-	Language      string `json:"language,omitempty"`
-	RetryCount    int    `json:"retry_count,omitempty"`
+	AttachmentID    int    `json:"attachment_id"`
+	AudioFilePath   string `json:"audio_file_path"`
+	Language        string `json:"language,omitempty"`
+	ImportBatchID   *int   `json:"import_batch_id,omitempty"`
+	RetryCount      int    `json:"retry_count,omitempty"`
 }
 
 // TranscriptionResult represents the result sent back to RabbitMQ.
 type TranscriptionResult struct {
-	AttachmentID int     `json:"attachment_id"`
-	Texto        string  `json:"texto"`
-	Duration     float64 `json:"duration"`
-	Model        string  `json:"model"`
-	Success      bool    `json:"success"`
-	ErrorMessage string  `json:"error_message,omitempty"`
+	AttachmentID  int     `json:"attachment_id"`
+	Texto         string  `json:"texto"`
+	Duration      float64 `json:"duration"`
+	Model         string  `json:"model"`
+	Success       bool    `json:"success"`
+	ImportBatchID *int    `json:"import_batch_id,omitempty"`
+	ErrorMessage  string  `json:"error_message,omitempty"`
 }
 
 // PythonWorkerRequest is the request sent to Python worker via stdin.

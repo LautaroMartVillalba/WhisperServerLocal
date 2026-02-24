@@ -76,6 +76,7 @@ func (p *Pool) processJob(workerID int, job rabbitmq.Job) {
 	if !validator.FileExists(request.AudioFilePath) {
 		err := p.producer.PublishError(
 			request.AttachmentID,
+			request.ImportBatchID,
 			"Audio file not found: "+request.AudioFilePath,
 		)
 		if err != nil {
@@ -91,6 +92,7 @@ func (p *Pool) processJob(workerID int, job rabbitmq.Job) {
 	if !validator.ValidateAudioExtension(request.AudioFilePath) {
 		err := p.producer.PublishError(
 			request.AttachmentID,
+			request.ImportBatchID,
 			"Unsupported audio format",
 		)
 		if err != nil {
@@ -120,6 +122,7 @@ func (p *Pool) processJob(workerID int, job rabbitmq.Job) {
 	// 6. Success - publish result
 	err = p.producer.PublishSuccess(
 		request.AttachmentID,
+		request.ImportBatchID,
 		response.Texto,
 		response.Duration,
 	)
@@ -154,7 +157,7 @@ func (p *Pool) handleFailure(workerID int, job rabbitmq.Job, errorMessage string
 	// Max retries exceeded
 	log.Printf("[W%d] ❌ #%d failed: %s", workerID, request.AttachmentID, errorMessage)
 
-	err := p.producer.PublishError(request.AttachmentID, errorMessage)
+	err := p.producer.PublishError(request.AttachmentID, request.ImportBatchID, errorMessage)
 	if err != nil {
 		log.Printf("[W%d] ❌ Error publish failed: %v", workerID, err)
 		job.Delivery.Nack(false, true) // Requeue

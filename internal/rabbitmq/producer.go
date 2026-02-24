@@ -196,26 +196,28 @@ func (p *Producer) PublishRetry(request TranscriptionRequest) error {
 }
 
 // PublishError publishes an error result when max retries exceeded.
-func (p *Producer) PublishError(attachmentID int, errorMessage string) error {
+func (p *Producer) PublishError(attachmentID int, importBatchID *int, errorMessage string) error {
 	result := TranscriptionResult{
-		AttachmentID: attachmentID,
-		Texto:        "",
-		Duration:     0,
-		Model:        p.model,
-		Success:      false,
-		ErrorMessage: errorMessage,
+		AttachmentID:  attachmentID,
+		Texto:         "",
+		Duration:      0,
+		Model:         p.model,
+		Success:       false,
+		ImportBatchID: importBatchID,
+		ErrorMessage:  errorMessage,
 	}
 	return p.PublishResult(result)
 }
 
 // PublishSuccess publishes a successful transcription result.
-func (p *Producer) PublishSuccess(attachmentID int, texto string, duration float64) error {
+func (p *Producer) PublishSuccess(attachmentID int, importBatchID *int, texto string, duration float64) error {
 	result := TranscriptionResult{
-		AttachmentID: attachmentID,
-		Texto:        texto,
-		Duration:     duration,
-		Model:        p.model,
-		Success:      true,
+		AttachmentID:  attachmentID,
+		Texto:         texto,
+		Duration:      duration,
+		Model:         p.model,
+		Success:       true,
+		ImportBatchID: importBatchID,
 	}
 	return p.PublishResult(result)
 }
