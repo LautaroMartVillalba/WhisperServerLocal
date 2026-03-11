@@ -110,7 +110,8 @@ El servicio **siempre publica exactamente un resultado por cada job recibido**, 
   "duration": 12.45,
   "model": "base",
   "success": true,
-  "import_batch_id": 7
+  "import_batch_id": 7,
+  "processing_time_ms": 3241
 }
 ```
 
@@ -137,6 +138,7 @@ El servicio **siempre publica exactamente un resultado por cada job recibido**, 
 | `success` | `bool` | ✅ | `true` si la transcripción fue exitosa, `false` en cualquier tipo de error. |
 | `import_batch_id` | `int \| null` | ✅ | Mismo valor recibido en el request. |
 | `error_message` | `string` | ❌ | Descripción del error. Solo presente cuando `success` es `false`. |
+| `processing_time_ms` | `int64` | ❌ | Tiempo total de procesamiento en milisegundos, medido en Go desde antes de invocar Python hasta recibir la respuesta. Solo presente cuando `success` es `true`. |
 
 **Modificar el tipo del mensaje:** `TranscriptionResult` en [internal/rabbitmq/types.go](internal/rabbitmq/types.go).
 

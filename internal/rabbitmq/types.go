@@ -12,13 +12,14 @@ type TranscriptionRequest struct {
 
 // TranscriptionResult represents the result sent back to RabbitMQ.
 type TranscriptionResult struct {
-	AttachmentID  int     `json:"attachment_id"`
-	Texto         string  `json:"texto"`
-	Duration      float64 `json:"duration"`
-	Model         string  `json:"model"`
-	Success       bool    `json:"success"`
-	ImportBatchID *int    `json:"import_batch_id,omitempty"`
-	ErrorMessage  string  `json:"error_message,omitempty"`
+	AttachmentID     int     `json:"attachment_id"`
+	Texto            string  `json:"texto"`
+	Duration         float64 `json:"duration"`
+	Model            string  `json:"model"`
+	Success          bool    `json:"success"`
+	ImportBatchID    *int    `json:"import_batch_id,omitempty"`
+	ErrorMessage     string  `json:"error_message,omitempty"`
+	ProcessingTimeMs int64   `json:"processing_time_ms,omitempty"`
 }
 
 // PythonWorkerRequest is the request sent to Python worker via stdin.

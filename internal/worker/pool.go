@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"whisper-local/internal/rabbitmq"
 	"whisper-local/internal/validator"
@@ -104,8 +105,10 @@ func (p *Pool) processJob(workerID int, job rabbitmq.Job) {
 		return
 	}
 
-	// 3. Execute Python worker
+	// 3. Execute Python worker — start processing timer
+	start := time.Now()
 	response, err := p.processPool.Execute(request)
+	processingTimeMs := time.Since(start).Milliseconds()
 
 	// 4. Handle execution error
 	if err != nil {
@@ -125,6 +128,7 @@ func (p *Pool) processJob(workerID int, job rabbitmq.Job) {
 		request.ImportBatchID,
 		response.Texto,
 		response.Duration,
+		processingTimeMs,
 	)
 	if err != nil {
 		log.Printf("[W%d] ❌ Publish failed: %v", workerID, err)

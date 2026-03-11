@@ -210,14 +210,15 @@ func (p *Producer) PublishError(attachmentID int, importBatchID *int, errorMessa
 }
 
 // PublishSuccess publishes a successful transcription result.
-func (p *Producer) PublishSuccess(attachmentID int, importBatchID *int, texto string, duration float64) error {
+func (p *Producer) PublishSuccess(attachmentID int, importBatchID *int, texto string, duration float64, processingTimeMs int64) error {
 	result := TranscriptionResult{
-		AttachmentID:  attachmentID,
-		Texto:         texto,
-		Duration:      duration,
-		Model:         p.model,
-		Success:       true,
-		ImportBatchID: importBatchID,
+		AttachmentID:     attachmentID,
+		Texto:            texto,
+		Duration:         duration,
+		Model:            p.model,
+		Success:          true,
+		ImportBatchID:    importBatchID,
+		ProcessingTimeMs: processingTimeMs,
 	}
 	return p.PublishResult(result)
 }
